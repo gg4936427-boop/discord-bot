@@ -1,1 +1,560 @@
+اimport os
+import sqlite3
+import discord
+from discord import app_commands
+from discord.ext import commands
+from dotenv import load_dotenv
 
+load_dotenv()
+
+TOKEN = os.getenv("DISCORD_TOKEN")
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0"))
+
+intents = discord.Intents.default()
+intents.members = True
+intents.message_content = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# =========================
+# DATABASE
+# =========================
+
+db = sqlite3.connect("rp.db")
+cur = db.cursor()
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS warnings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    moderator_id INTEGER,
+    reason TEXT
+)
+""")
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS violations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    moderator_id INTEGER,
+    reason TEXT
+)
+""")
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS identities (
+    user_id INTEGER PRIMARY KEY,
+    name TEXT,
+    age INTEGER,
+    job TEXT,
+    city TEXT
+)
+""")
+
+db.commit()
+
+
+# =========================
+# READY
+# =========================
+
+@bot.event
+async def on_ready():
+    await bot.tree.sync()
+    print(f"✅ البوت يعمل: {bot.user}")
+    print("✅ تم مزامنة أوامر RP")
+
+
+# =========================
+# LOG SYSTEM
+# =========================
+
+async def send_log(message):
+    if LOG_CHANNEL_ID == 0:
+        return
+
+    channel = bot.get_channel(LOG_CHANNEL_ID)
+
+    if channel:
+        await channel.send(message)
+
+
+# =========================
+# WARNING
+# =========================
+
+@bot.tree.command(name="warn", description="إعطاء عضو تحذير")
+@app_commands.describe(
+    member="العضو",
+    reason="سبب التحذير"
+)
+async def warn(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    reason: str
+):
+
+    cur.execute(
+        "INSERT INTO warnings (user_id, moderator_id, reason) VALUES (?, ?, ?)",
+        (member.id, interaction.user.id, reason)
+    )
+
+    db.commit()
+
+    await interaction.response.send_message(
+        f"⚠️ تم تحذير {member.mention}\n"
+        f"**السبب:** {reason}"
+    )
+
+    await send_log(
+        f"⚠️ **تحذير**\n"
+        f"العضو: {member.mention}\n"
+        f"المشرف: {interaction.user.mention}\n"
+        f"السبب: {reason}"
+    )
+
+
+# =========================
+# VIOLATION
+# =========================
+
+@bot.tree.command(name="violation", description="تسجيل مخالفة RP")
+@app_commands.describe(
+    member="العضو",
+    reason="سبب المخالفة"
+)
+async def violation(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    reason: str
+):
+
+    cur.execute(
+        "INSERT INTO violations (user_id, moderator_id, reason) VALUES (?, ?, ?)",
+        (member.id, interaction.user.id, reason)
+    )
+
+    db.commit()
+
+    await interaction.response.send_message(
+        f"🚨 تم تسجيل مخالفة على {member.mention}\n"
+        f"**السبب:** {reason}"
+    )
+
+    await send_log(
+        f"🚨 **مخالفة RP**\n"
+        f"العضو: {member.mention}\n"
+        f"المشرف: {interaction.user.mention}\n"
+        f"السبب: {reason}"
+    )
+
+
+# =========================
+# KICK
+# =========================
+
+@bot.tree.command(name="kick", description="طرد عضو")
+@app_commands.describe(
+    member="العضو",
+    reason="سبب الطرد"
+)
+async def kick(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    reason: str
+):
+
+    if not interaction.user.guild_permissions.kick_members:
+        return await interaction.response.send_message(
+            "❌ ما عندك صلاحية الطرد.",
+            ephemeral=True
+        )
+
+    await member.kick(reason=reason)
+
+    await interaction.response.send_message(
+        f"👢 تم طرد {member.mention}\n**السبب:** {reason}"
+    )
+
+    await send_log(
+        f"👢 **طرد**\nالعضو: {member}\nالمشرف: {interaction.user}\nالسبب: {reason}"
+    )
+
+
+# =========================
+# BAN
+# =========================
+
+@bot.tree.command(name="ban", description="حظر عضو")
+@app_commands.describe(
+    member="العضو",
+    reason="سبب الحظر"
+)
+async def ban(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    reason: str
+):
+
+    if not interaction.user.guild_permissions.ban_members:
+        return await interaction.response.send_message(
+            "❌ ما عندك صلاحية الباند.",
+            ephemeral=True
+        )
+
+    await member.ban(reason=reason)
+
+    await interaction.response.send_message(
+        f"🔨 تم حظر {member.mention}\n**السبب:** {reason}"
+    )
+
+    await send_log(
+        f"🔨 **باند**\nالعضو: {member}\nالمشرف: {interaction.user}\nالسبب: {reason}"
+    )
+
+
+# =========================
+# TIMEOUT
+# =========================
+
+@bot.tree.command(name="timeout", description="كتم عضو مؤقتًا")
+@app_commands.describe(
+    member="العضو",
+    minutes="مدة الكتم بالدقائق",
+    reason="السبب"
+)
+async def timeout(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    minutes: int,
+    reason: str
+):
+
+    if not interaction.user.guild_permissions.moderate_members:
+        return await interaction.response.send_message(
+            "❌ ما عندك صلاحية الكتم.",
+            ephemeral=True
+        )
+
+    if minutes < 1 or minutes > 40320:
+        return await interaction.response.send_message(
+            "❌ المدة يجب أن تكون بين دقيقة و40320 دقيقة.",
+            ephemeral=True
+        )
+
+    duration = discord.utils.utcnow() + discord.timedelta(
+        minutes=minutes
+    )
+
+    await member.timeout(duration, reason=reason)
+
+    await interaction.response.send_message(
+        f"🔇 تم كتم {member.mention} لمدة **{minutes} دقيقة**.\n"
+        f"**السبب:** {reason}"
+    )
+
+
+# =========================
+# CLEAR
+# =========================
+
+@bot.tree.command(name="clear", description="حذف رسائل")
+@app_commands.describe(amount="عدد الرسائل")
+async def clear(
+    interaction: discord.Interaction,
+    amount: int
+):
+
+    if not interaction.user.guild_permissions.manage_messages:
+        return await interaction.response.send_message(
+            "❌ ما عندك صلاحية حذف الرسائل.",
+            ephemeral=True
+        )
+
+    if amount < 1 or amount > 100:
+        return await interaction.response.send_message(
+            "❌ اختر رقمًا بين 1 و100.",
+            ephemeral=True
+        )
+
+    await interaction.channel.purge(limit=amount)
+
+    await interaction.response.send_message(
+        f"🧹 تم حذف **{amount}** رسالة.",
+        ephemeral=True
+    )
+
+
+# =========================
+# WARNINGS
+# =========================
+
+@bot.tree.command(name="warnings", description="عرض تحذيرات عضو")
+@app_commands.describe(member="العضو")
+async def warnings(
+    interaction: discord.Interaction,
+    member: discord.Member
+):
+
+    cur.execute(
+        "SELECT reason FROM warnings WHERE user_id=?",
+        (member.id,)
+    )
+
+    rows = cur.fetchall()
+
+    if not rows:
+        return await interaction.response.send_message(
+            f"✅ {member.mention} ليس لديه تحذيرات."
+        )
+
+    text = "\n".join(
+        f"• {row[0]}" for row in rows
+    )
+
+    await interaction.response.send_message(
+        f"⚠️ تحذيرات {member.mention}:\n{text}"
+    )
+
+
+# =========================
+# IDENTITY
+# =========================
+
+@bot.tree.command(name="identity", description="إنشاء هوية RP")
+@app_commands.describe(
+    name="اسم الشخصية",
+    age="العمر",
+    job="الوظيفة",
+    city="المدينة"
+)
+async def identity(
+    interaction: discord.Interaction,
+    name: str,
+    age: int,
+    job: str,
+    city: str
+):
+
+    cur.execute("""
+    INSERT OR REPLACE INTO identities
+    (user_id, name, age, job, city)
+    VALUES (?, ?, ?, ?, ?)
+    """, (
+        interaction.user.id,
+        name,
+        age,
+        job,
+        city
+    ))
+
+    db.commit()
+
+    embed = discord.Embed(
+        title="🪪 هوية RP",
+        description="تم إنشاء هويتك بنجاح.",
+    )
+
+    embed.add_field(
+        name="👤 الاسم",
+        value=name,
+        inline=False
+    )
+
+    embed.add_field(
+        name="🎂 العمر",
+        value=str(age),
+        inline=True
+    )
+
+    embed.add_field(
+        name="💼 الوظيفة",
+        value=job,
+        inline=True
+    )
+
+    embed.add_field(
+        name="🏙️ المدينة",
+        value=city,
+        inline=True
+    )
+
+    await interaction.response.send_message(
+        embed=embed
+    )
+
+
+# =========================
+# MY IDENTITY
+# =========================
+
+@bot.tree.command(name="myidentity", description="عرض هويتك")
+async def myidentity(
+    interaction: discord.Interaction
+):
+
+    cur.execute(
+        "SELECT name, age, job, city FROM identities WHERE user_id=?",
+        (interaction.user.id,)
+    )
+
+    row = cur.fetchone()
+
+    if not row:
+        return await interaction.response.send_message(
+            "❌ ما عندك هوية. استخدم `/identity`."
+        )
+
+    name, age, job, city = row
+
+    embed = discord.Embed(
+        title="🪪 هويتك"
+    )
+
+    embed.add_field(
+        name="👤 الاسم",
+        value=name
+    )
+
+    embed.add_field(
+        name="🎂 العمر",
+        value=str(age)
+    )
+
+    embed.add_field(
+        name="💼 الوظيفة",
+        value=job
+    )
+
+    embed.add_field(
+        name="🏙️ المدينة",
+        value=city
+    )
+
+    await interaction.response.send_message(
+        embed=embed
+    )
+
+
+# =========================
+# TICKET
+# =========================
+
+@bot.tree.command(name="ticket", description="فتح تذكرة دعم")
+async def ticket(interaction: discord.Interaction):
+
+    guild = interaction.guild
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(
+            view_channel=False
+        ),
+        interaction.user: discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True
+        )
+    }
+
+    channel = await guild.create_text_channel(
+        name=f"ticket-{interaction.user.name}",
+        overwrites=overwrites
+    )
+
+    await channel.send(
+        f"🎫 مرحبًا {interaction.user.mention}\n"
+        f"اكتب مشكلتك هنا وسيتم الرد عليك."
+    )
+
+    await interaction.response.send_message(
+        f"🎫 تم فتح التذكرة: {channel.mention}",
+        ephemeral=True
+    )
+
+
+# =========================
+# RP RULES
+# =========================
+
+@bot.tree.command(name="rprules", description="عرض قوانين RP")
+async def rprules(interaction: discord.Interaction):
+
+    embed = discord.Embed(
+        title="📜 قوانين RP",
+        description="""
+**1️⃣ RDM**
+ممنوع قتل لاعب بدون سبب RP.
+
+**2️⃣ VDM**
+ممنوع استخدام المركبة لقتل اللاعبين.
+
+**3️⃣ Meta Gaming**
+ممنوع استخدام معلومات خارج RP داخل السيناريو.
+
+**4️⃣ Power Gaming**
+ممنوع إجبار لاعب على سيناريو غير منطقي.
+
+**5️⃣ Fear RP**
+يجب الحفاظ على حياة شخصيتك.
+
+**6️⃣ Fail RP**
+ممنوع تخريب السيناريو أو التصرف بشكل غير منطقي.
+
+**7️⃣ احترام الإدارة**
+يجب الالتزام بتعليمات الإدارة.
+"""
+    )
+
+    await interaction.response.send_message(
+        embed=embed
+    )
+
+
+# =========================
+# HELP
+# =========================
+
+@bot.tree.command(name="help", description="عرض أوامر البوت")
+async def help_command(
+    interaction: discord.Interaction
+):
+
+    embed = discord.Embed(
+        title="🤖 أوامر AX City RP",
+        description="""
+🛡️ **الإدارة**
+`/warn`
+`/warnings`
+`/violation`
+`/kick`
+`/ban`
+`/timeout`
+`/clear`
+
+🪪 **RP**
+`/identity`
+`/myidentity`
+`/rprules`
+
+🎫 **التذاكر**
+`/ticket`
+
+استخدم الأمر المناسب من قائمة `/`.
+"""
+    )
+
+    await interaction.response.send_message(
+        embed=embed
+    )
+
+
+# =========================
+# START
+# =========================
+
+if not TOKEN:
+    raise ValueError(
+        "❌ لم يتم العثور على DISCORD_TOKEN"
+    )
+
+bot.run(TOKEN)
